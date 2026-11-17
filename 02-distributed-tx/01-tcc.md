@@ -185,6 +185,67 @@ ResponseTry(node) ≜
 
 `mailbox` 是集合，重复投递不会累积，响应侧又靠 `state` 的 guard 挡住重复执行，所以幂等也不需要额外处理。
 
+### 执行者为什么要先塞进 mailbox 再查
+
+现实里，执行者收到一条 RPC，RPC 的类型就决定了它调哪个方法。是 Try 就调 `try()`，是 Cancel 就调 `cancel()`，类型写在消息里，不用猜。
+
+规约里不是这样。消息先被塞进 `mailbox[node]`，响应动作再去集合里看现在有什么：
+
+```tla
+ResponseTry(node) ≜
+    ∧ Try ∈ mailbox[node]
+    ∧ state[node] = Null
+    ∧ IF Cancel ∈ mailbox[node]
+      THEN ...
+      ELSE ...
+```
+
+这就是"一股脑塞进去，再回头看之前来过什么"。
+
+为什么要这么写？
+
+因为到达顺序不确定。如果写成"收到 Try 就直接调 `ResponseTry`"，等于默认了 Try 一定先到，那空回滚和悬挂就表达不出来。
+
+把消息先放进集合，集合本身不关心顺序。响应动作再根据"集合里现在有什么"来决定行为：
+
+- 只有 Try → 正常进入 Try
+- Try 和 Cancel 都在 → 说明 Cancel 先到过，直接进 Cancel
+- 只有 Cancel → `ResponseTry` 的 guard 不满足，不执行
+
+同一个 `ResponseTry`，靠 `IF Cancel ∈ mailbox[node]` 这一个判断，覆盖了两种到达顺序。
+
+这和现实里不一样，但覆盖的范围比现实大。多的能罩住少的。
+
+### 三个 bool 补上"发过没有"
+
+`mailbox` 是集合，集合不记顺序，也不记次数。所以另开了三个布尔变量：
+
+```tla
+RequestTry ≜
+    ...
+    ∧ sended_try' = TRUE
+
+RequestConfrim ≜
+    ∧ sended_try = TRUE ∧ sended_cancel = FALSE
+    ...
+    ∧ sended_confrim' = TRUE
+
+RequestCancel ≜
+    ∧ sended_try = TRUE ∧ sended_confrim = FALSE
+    ...
+    ∧ sended_cancel = TRUE
+```
+
+三条约束：
+
+- Try 只能在最开始发一次
+- Confirm 必须在 Try 之后，而且 Cancel 还没发
+- Cancel 必须在 Try 之后，而且 Confirm 还没发
+
+没有这三个 bool，集合分不清"Try 到底发过没有"，也拦不住"先 Confirm 再 Cancel"这种不合法的顺序。
+
+它们不负责"只发一次"的幂等（那是应用层和各节点自己的事），只保证规约里的调用顺序是合法的。这是最低限度的顺序保证。
+
 ### 验证了什么
 
 一共三条，都跑过。
