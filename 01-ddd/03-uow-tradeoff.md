@@ -172,10 +172,11 @@ class DomainEntity(ABC):
 
 ```python
 class User(DomainEntity):
-    def change_name(self, first_name: str, last_name: str, infra: UserInfraService):
-        new_name = Name(first_name, last_name)
-        if not new_name.is_safe(infra):
+    def change_name(self, first_name: str, last_name: str, safe: bool):
+        if not safe:
             raise UserException("the name contains unsafe characters")
+
+        new_name = Name(first_name, last_name)
         if not new_name.length_is_valid():
             raise UserException(f"User name is too long, max is {USER_NAME_MAX_LAN}")
 
@@ -191,20 +192,29 @@ class User(DomainEntity):
         )
 ```
 
-事件在实体内部产生，因为只有实体知道"改名前叫什么、改名后叫什么"。
+`is_safe` 变成了一个 `bool` 参数。
 
-应用服务只负责收集和转交：
+因为敏感词检查背后是 HTTP，属于慢依赖，不能放进实体。实体拿到的是应用服务算好的结论，不是自己去查。
+
+事件仍然在实体内部产生，因为只有实体知道"改名前叫什么、改名后叫什么"。
+
+应用服务负责三件事：调网关、加载、交事件。
 
 ```python
 def change_name(self, uid: int, first_name: str, last_name: str) -> None:
+    # 事务外：走网关查敏感词
+    safe = self.is_safe(f"{first_name} {last_name}")
+
     with self.uow.command():
         user = User.get(uid, self.infra)
-        user.change_name(first_name, last_name, self.infra)
+        user.change_name(first_name, last_name, safe)
         self.user_repo.save_user(user)
         self.uow.accept_event_list(user.event_list)
 ```
 
-四步：加载、改、存、交事件。
+敏感词查询放在 `with` 外面。这一步可能要几百毫秒，放进去会把事务拖长。
+
+顺序是：先算出"合不合法"，再开事务做"读、改、存、交事件"。
 
 ## 事件从产生到落表
 

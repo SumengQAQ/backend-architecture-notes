@@ -69,5 +69,5 @@ DDD 是一套架构的方法论，需要结合具体架构来实现。最常见�
 本目录结合 IDDD 中的经典理论与伪代码，推演 DDD 在落地时的难点与痛点。
 
 - [聚合边界如何划分](./01-aggregate-boundary.md)
-- Repository 与 Data Mapper 的分层（待写）
-- 为什么放弃 UoW（待写）
+- [分层：Repository、Mapper 与依赖方向](./02-repository-mapper.md)
+- [为什么不用全自动的 UoW](./03-uow-tradeoff.md)

@@ -563,14 +563,17 @@ class AccountInfraService(Protocol):
 值对象只返回状态。实体判断自身状态合不合法，不合法就抛。领域服务判断跨聚合之后的结果，不合法也抛。
 
 ```python
-def change_name(self, first_name: str, last_name: str, infra: UserInfraService):
-    new_name = Name(first_name, last_name)
-    if not new_name.is_safe(infra):
+def change_name(self, first_name: str, last_name: str, safe: bool):
+    if not safe:
         raise UserException("the name contains unsafe characters")
+
+    new_name = Name(first_name, last_name)
     if not new_name.length_is_valid():
         raise UserException(f"User name is too long, max is {USER_NAME_MAX_LAN}")
     self._name = new_name
 ```
+
+`length_is_valid()` 返回 bool，由实体决定要不要抛。`safe` 也是 bool，只不过它是应用服务从网关拿到的，不是实体自己算的。
 
 为什么值对象不自己抛？同一个 `Name`，在注册场景长度不对是错误，在展示场景可能只是截断成简称。值对象只知道自己合不合法，不知道调用方要拿它干什么。
 
@@ -580,7 +583,7 @@ def change_name(self, first_name: str, last_name: str, infra: UserInfraService):
 
 | 谁       | 抛什么             | 例子                  |
 | -------- | ------------------ | --------------------- |
-| 值对象   | 不抛，只返回状态   | `is_safe()` 返回 bool |
+| 值对象   | 不抛，只返回状态   | `length_is_valid()` 返回 bool |
 | 实体     | 自身状态不合法     | 名字超长、余额为负    |
 | 领域服务 | 跨聚合组合后不合法 | 账户和用户对不上      |
 
