@@ -544,12 +544,16 @@ class TransferAppService:
             from_delta = latest_from_account.balance - original_from_account.balance
             to_delta = latest_to_account.balance - original_to_account.balance
 
+            # NOTE 这里的 version 必须用事务外那次读到的（from_account / to_account），
+            #      不能用 latest_*。因为汇率是按事务外的币种算的，
+            #      如果这期间币种变了，latest_* 的 version 已经包含这次变更，
+            #      条件更新会通过，但 delta 用的是旧币种，账就错了。
             if from_account_id < to_account_id:
-                rows1 = self.account_repo.update_balance(from_account_id, from_delta, latest_from_account.version)
-                rows2 = self.account_repo.update_balance(to_account_id, to_delta, latest_to_account.version)
+                rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.version)
+                rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.version)
             else:
-                rows2 = self.account_repo.update_balance(to_account_id, to_delta, latest_to_account.version)
-                rows1 = self.account_repo.update_balance(from_account_id, from_delta, latest_from_account.version)
+                rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.version)
+                rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.version)
 
             if rows1 == 0 or rows2 == 0:
                 raise TransferServiceErr("concurrency conflict, please retry")

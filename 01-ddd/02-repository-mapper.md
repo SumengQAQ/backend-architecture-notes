@@ -306,12 +306,13 @@ def execute_transfer_v2(self, from_uid, to_uid, from_account_id, to_account_id, 
         from_delta = latest_from.balance - original_from.balance
         to_delta = latest_to.balance - original_to.balance
 
+        # 版本号用事务外那次读的（from_account / to_account），不是 latest_*
         if from_account_id < to_account_id:
-            rows1 = self.account_repo.update_balance(from_account_id, from_delta, latest_from.version)
-            rows2 = self.account_repo.update_balance(to_account_id, to_delta, latest_to.version)
+            rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.version)
+            rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.version)
         else:
-            rows2 = self.account_repo.update_balance(to_account_id, to_delta, latest_to.version)
-            rows1 = self.account_repo.update_balance(from_account_id, from_delta, latest_from.version)
+            rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.version)
+            rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.version)
 
         if rows1 == 0 or rows2 == 0:
             raise TransferServiceErr("concurrency conflict, please retry")
@@ -355,6 +356,12 @@ delta 不需要在应用服务里手算。业务怎么变、变多少，还是�
 条件更新挡不住这种情况。`balance + delta >= 0` 只看余额，不看币种。delta 是按旧币种算的，币种一变，加进去的数就是错的。
 
 所以还要版本号。币种改了，version 必然跟着变；`update_balance` 带上 version 条件，影响 0 行就说明中间有人动过，抛出去让上层重试。
+
+版本号必须用事务外那次读到的 `from_account.version`，不能用事务里重新读出来的 `latest_from.version`。
+
+`latest_from` 是 `transfer` 在事务内重新取的最新值。如果币种在这期间被改过，它的 version 也已经跟着往前走了。拿这个 version 做条件更新，条件永远成立，写进去的却是按旧币种算的 delta。版本号等于没用上。
+
+`from_account` 是查汇率时读的那份，version 对应的是币种还没变的状态。用它做条件，币种一变就是 0 行，能挡住。
 
 ```python
 def update_balance(self, account_id: int, delta: Decimal, version: int) -> bool:
