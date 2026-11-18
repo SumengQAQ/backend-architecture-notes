@@ -1,5 +1,5 @@
 ---- MODULE Saga ----
-\* Saga 规约 v2：正向按序执行，失败后逆序补偿。
+\* Saga 规约：正向按序执行，失败后逆序补偿。
 \*
 \* 三个要点：
 \*   1. 空回滚、悬挂、幂等是"某一步"的异常，不是"某个节点"的，所以状态必须按 step 记
@@ -8,7 +8,7 @@
 
 EXTENDS Integers, FiniteSets, Bags
 
-VARIABLES tx_type, last_step, node_to_step, step_to_node, order_to_step,
+VARIABLES tx_type, last_step, node_to_step, order_to_step,
           mailbox, cost, step_state, resource, will_do, will_undo, period
 
 CONSTANTS NODES, STEPS
@@ -27,7 +27,7 @@ Null ≜ "Null"
 Done ≜ "Done"
 Undone ≜ "Undone"
 
-vars ≜ ⟨tx_type, last_step, node_to_step, step_to_node, order_to_step,
+vars ≜ ⟨tx_type, last_step, node_to_step, order_to_step,
          mailbox, cost, step_state, resource, will_do, will_undo, period⟩
 
 RECURSIVE MergeSetToBag(_)
@@ -46,26 +46,27 @@ Enumerate(S, i) ≜
 
 Range(f) ≜ {f[x]: x ∈ DOMAIN f}
 
-Items(f) ≜ {⟨x, f[x]⟩: x ∈ DOMAIN f}
+\* 被节点认领的步骤。STEPS 里可以有没人认领的，等于这个场景用不到它
+UsedSteps ≜ DOMAIN MergeSetToBag(NODES)
+
+\* 按步骤找节点。能从 node_to_step 推出来，不单独占一个变量
+StepToNode ≜ [s ∈ UsedSteps ↦ CHOOSE n ∈ NODES: s ∈ node_to_step[n]]
 
 Init ≜
-    \* 每个 step 恰好属于一个 node，node 可以没有 step
+    \* 每个步骤最多属于一个节点，也可以谁都不属于；节点可以有零个或多个步骤
     ∧ node_to_step ∈ [NODES → SUBSET STEPS]
     ∧ MergeSetToBag(NODES) ≠ EmptyBag
     ∧ ∀ count ∈ Range(MergeSetToBag(NODES)): count = 1
 
-    ∧ step_to_node ∈ [STEPS → NODES]
-    ∧ ∀ ⟨step, node⟩ ∈ Items(step_to_node): step ∈ node_to_step[node]
-
-    \* 给步骤标号，方便按顺序执行、逆序补偿
-    ∧ order_to_step = Enumerate(STEPS, 1)
+    \* 只给用到的步骤标号
+    ∧ order_to_step = Enumerate(UsedSteps, 1)
 
     \* 结局前置：要么全部成功，要么在第 last_step 步之后失败
     ∧ tx_type ∈ {CanDoAll, NeedUndo}
     ∧ IF    tx_type = NeedUndo
-      THEN  ∧ last_step ∈ 1‥Cardinality(STEPS)
+      THEN  ∧ last_step ∈ 1‥Cardinality(UsedSteps)
             ∧ will_undo = last_step
-      ELSE  ∧ last_step = Cardinality(STEPS)
+      ELSE  ∧ last_step = Cardinality(UsedSteps)
             ∧ will_undo = 0
 
     ∧ mailbox = [node ∈ NODES ↦ {}]
@@ -87,10 +88,10 @@ AdvanceDoing ≜
         THEN TRUE
         ELSE step_state[order_to_step[will_do - 1]] = Done
     ∧ LET step ≜ order_to_step[will_do]
-      IN  ∧ mailbox' = [mailbox EXCEPT ![step_to_node[step]] =
+      IN  ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
               @ ∪ {[type |-> Do, step |-> step]}]
           ∧ will_do' = will_do + 1
-          ∧ UNCHANGED ⟨tx_type, last_step, node_to_step, step_to_node,
+          ∧ UNCHANGED ⟨tx_type, last_step, node_to_step,
                        order_to_step, cost, step_state, resource,
                        will_undo, period⟩
 
@@ -100,11 +101,11 @@ AdvanceUndoing ≜
     ∧ will_undo ≥ 1
     ∧ will_do = last_step + 1
     ∧ LET step ≜ order_to_step[will_undo]
-      IN  ∧ mailbox' = [mailbox EXCEPT ![step_to_node[step]] =
+      IN  ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
                 @ ∪ {[type |-> Undo, step |-> step]}]
           ∧ will_undo' = will_undo - 1
           ∧ period' = Undoing
-          ∧ UNCHANGED ⟨tx_type, last_step, node_to_step, step_to_node,
+          ∧ UNCHANGED ⟨tx_type, last_step, node_to_step,
                        order_to_step, cost, step_state, resource, will_do⟩
 
 AdvanceFinish ≜
@@ -113,8 +114,8 @@ AdvanceFinish ≜
     ∧ will_undo = 0
     ∧ ∀ node ∈ NODES: mailbox[node] = {}
     ∧ period' = Finish
-    ∧ UNCHANGED ⟨tx_type, last_step, node_to_step, step_to_node,
-                 order_to_step, mailbox, cost, step_state, resource,
+    ∧ UNCHANGED ⟨tx_type, last_step, node_to_step, order_to_step,
+                 mailbox, cost, step_state, resource,
                  will_do, will_undo⟩
 
 --------------------------------------------------------------------------
@@ -132,8 +133,8 @@ ResponseDo(node) ≜
                  ∧ resource' = [resource EXCEPT ![row.step] = @ - 1]
                  ∧ cost' = cost + 1
             ELSE ∧ UNCHANGED ⟨step_state, resource, cost⟩
-        ∧ UNCHANGED ⟨tx_type, last_step, node_to_step, step_to_node,
-                     order_to_step, will_do, will_undo, period⟩
+        ∧ UNCHANGED ⟨tx_type, last_step, node_to_step, order_to_step,
+                     will_do, will_undo, period⟩
 
 \* 响应对应 step 的 Undo。
 \* step_state = Done 时真正补偿；Null 是空回滚；Undone 是重复消息（幂等）。
@@ -147,28 +148,28 @@ ResponseUndo(node) ≜
                  ∧ cost' = cost - 1
             ELSE ∧ step_state' = [step_state EXCEPT ![row.step] = Undone]
                  ∧ UNCHANGED ⟨resource, cost⟩
-        ∧ UNCHANGED ⟨tx_type, last_step, node_to_step, step_to_node,
-                     order_to_step, will_do, will_undo, period⟩
+        ∧ UNCHANGED ⟨tx_type, last_step, node_to_step, order_to_step,
+                     will_do, will_undo, period⟩
 
 --------------------------------------------------------------------------
 \* 不变式
 --------------------------------------------------------------------------
 
-\* 每个 step 的资源不越界，而且和状态严格对应
+\* 每个步骤的资源不越界，而且和状态严格对应
 ResourceBounded ≜
     ∀ step ∈ STEPS:
         ∧ resource[step] ∈ 1‥2
         ∧ (step_state[step] = Done ⇒ resource[step] = 1)
         ∧ (step_state[step] ≠ Done ⇒ resource[step] = 2)
 
-\* 记账准确：cost 就是此刻处于 Done 的 step 数
+\* 记账准确：cost 就是此刻处于 Done 的步骤数
 CostExact ≜
     cost = Cardinality({step ∈ STEPS: step_state[step] = Done})
 
-\* 走到 Finish 时，每个 step 的终态必须符合预选的结局
+\* 走到 Finish 时，每个用到的步骤终态必须符合预选的结局
 FinishShape ≜
     period = Finish ⇒
-        ∀ i ∈ 1‥Cardinality(STEPS):
+        ∀ i ∈ 1‥Cardinality(UsedSteps):
             LET step ≜ order_to_step[i]
             IN  IF tx_type = CanDoAll
                 THEN step_state[step] = Done

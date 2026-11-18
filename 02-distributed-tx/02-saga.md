@@ -36,7 +36,9 @@ TCC 一样，Saga 也会面临空回滚和悬挂的问题，处理方法与 TCC 
 node_to_step ∈ [NODES → SUBSET STEPS]
 ```
 
-这样能表达"节点 A 有 T1 和 T3，节点 B 有 T2"。可是光这一条不够，TLC 会认为"T1 同时属于 A 和 B"也是合法的初始状态，"T3 谁都不属于"也合法。这两种都不是业务上允许的。
+这样能表达"节点 A 有 T1 和 T3，节点 B 有 T2"。可是光这一条不够，TLC 会认为"T1 同时属于 A 和 B"也合法，一个步骤被两个节点抢着做，这不是业务上允许的。
+
+"T3 谁都不属于"倒是允许的，等于这次只用到 T1 和 T2。配几个步骤是常量决定的，同一份规约换个配置就能测不同数量的 T。
 
 问题是 TLA+ 的集合没有计数。两个集合做并集，重复的元素会被吃掉，看不出来它出现了两次。所以要用多重集：
 
@@ -56,20 +58,23 @@ MergeSetToBag(nodes) ≜
 ∧ ∀ count ∈ Range(MergeSetToBag(NODES)): count = 1
 ```
 
-`count = 1` 就是"每个步骤恰好出现一次"，重复的被挡住了。
+`count = 1` 就是"同一个步骤不会被两个节点认领"，重复的被挡住了。
 
-到这里还看不出来"漏"。漏掉的步骤不在任何一个 bag 里，计数检查碰不到它。所以再加一个反查：
+没人认领的步骤不在任何一个 bag 里，计数检查碰不到它。这是故意的，正好用来表达"有些步骤这次用不到"。所以标号只针对被认领的步骤：
 
 ```tla
-∧ step_to_node ∈ [STEPS → NODES]
-∧ ∀ ⟨step, node⟩ ∈ Items(step_to_node): step ∈ node_to_step[node]
+UsedSteps ≜ DOMAIN MergeSetToBag(NODES)
 ```
 
-每个步骤都要有归属，并且这个归属必须和上面那份分配对得上。配合 `count = 1`，就变成了"每个步骤恰好属于一个节点"。
+`last_step` 的范围和 `order_to_step` 都基于 `UsedSteps`，不是整个 `STEPS`。配五个步骤、实际只用三个，也能跑。
 
 节点那边不受限制，可以零个步骤，也可以有好几个。TLC 会把所有分配方式都枚举一遍。
 
-`step_to_node` 其实能从 `node_to_step` 推出来，留一份是因为发消息的时候要按步骤找节点，写两遍读起来直观。
+发消息的时候要按步骤找节点，这个映射直接算出来就行，不用再声明一个变量：
+
+```tla
+StepToNode ≜ [s ∈ UsedSteps ↦ CHOOSE n ∈ NODES: s ∈ node_to_step[n]]
+```
 
 ### 直接选在第几步失败
 
@@ -78,8 +83,8 @@ MergeSetToBag(nodes) ≜
 ```tla
 ∧ tx_type ∈ {CanDoAll, NeedUndo}
 ∧ IF tx_type = NeedUndo
-  THEN last_step ∈ 1‥Cardinality(STEPS)   \* 在第几步失败
-  ELSE last_step = Cardinality(STEPS)
+  THEN last_step ∈ 1‥Cardinality(UsedSteps)   \* 在第几步失败
+  ELSE last_step = Cardinality(UsedSteps)
 ```
 
 `CanDoAll` 就是一路走到底，`NeedUndo` 就是走到 `last_step` 之后开始往回撤。
@@ -104,7 +109,7 @@ AdvanceDoing ≜
         THEN TRUE
         ELSE step_state[order_to_step[will_do - 1]] = Done
     ∧ LET step ≜ order_to_step[will_do]
-      IN  ∧ mailbox' = [mailbox EXCEPT ![step_to_node[step]] =
+      IN  ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
               @ ∪ {[type |-> Do, step |-> step]}]
           ∧ will_do' = will_do + 1
 ```
@@ -126,7 +131,7 @@ AdvanceUndoing ≜
     ∧ will_undo ≥ 1
     ∧ will_do = last_step + 1
     ∧ LET step ≜ order_to_step[will_undo]
-      IN  ∧ mailbox' = [mailbox EXCEPT ![step_to_node[step]] =
+      IN  ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
                 @ ∪ {[type |-> Undo, step |-> step]}]
           ∧ will_undo' = will_undo - 1
           ∧ period' = Undoing
@@ -227,7 +232,7 @@ TLC 报"没有错误"的时候，有两种可能：系统是对的，或者模�
 
 一条属性：不管怎么乱序，最终一定会走到 Finish。
 
-2 个节点 3 个步骤的配置，生成 928 个状态，去重后 560 个。3 个节点 3 个步骤，生成 3132 个，去重后 1890 个。
+2 个节点 3 个步骤的配置，生成 1540 个状态，去重后 1016 个。3 个节点 3 个步骤，生成 4446 个，去重后 2862 个。
 
 ### 没建模的部分
 
