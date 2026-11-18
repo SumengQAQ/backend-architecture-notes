@@ -177,108 +177,126 @@ java -cp ~/tla2tools.jar tlc2.TLC -deadlock -config TCC.cfg TCC.tla
 
 规约里没有"超时"这个动作。
 
-理由是：超时只是触发 Cancel 的一种原因，业务失败、人工干预、熔断打开，都会触发 Cancel。与其一个个建模，不如直接假设"Try 之后任意时刻都可以 Cancel"。这个假设更宽松，覆盖了所有具体情况。
+超时只是触发 Cancel 的一种原因，业务失败、人工干预、熔断打开，都会触发 Cancel。与其一个个建模，不如直接假设"Try 之后任意时刻都可以 Cancel"。这个假设更宽松，覆盖了所有具体情况。
+
+新版里这条落在 `RequestCancel` 上：它只检查 `tx_type = "Cancel"`，不检查 Try 到没到，也不检查过了多久。
+
+### 原先那版的问题
+
+第一版规约里，请求动作是"一次给所有节点发"：
 
 ```tla
-RequestCancel ≜
-    ∧ sended_try = TRUE ∧ sended_confirm = FALSE
-    ∧ mailbox' = [node ∈ v_nodes ↦ mailbox[node] ∪ {Cancel}]
-    ∧ sended_cancel = TRUE
-    ∧ UNCHANGED ⟨receive_can, state, resource, v_nodes, sended_try, sended_confirm⟩
+RequestTry ≜
+    ∧ sended_try = FALSE
+    ∧ mailbox' = [node ∈ v_nodes ↦ mailbox[node] ∪ {Try}]
+    ∧ sended_try' = TRUE
+    ...
 ```
 
-`RequestCancel` 只要求"Try 发过、Confirm 没发"，对时刻没有任何约束。
+一个原子动作，所有节点同时收到。这样 Try 和 Cancel 只能整体换顺序：要么全体 Try 先，要么全体 Cancel 先。
+
+还有一个更隐蔽的问题：`RequestCancel` 的 guard 里有 `sended_try = TRUE`，所以 Cancel 消息一定在 Try 消息之后进入 mailbox。
+
+那空回滚怎么办？靠 `ResponseTry` 里的 `IF Cancel ∈ mailbox[node]` 分支。它表达的是"Try 到了但还没被处理，Cancel 先被处理了"。
+
+结果一样，但原因不一样。真实的空回滚是 Try 根本没到，不是到了没来得及处理。
+
+### 为什么可以直接选类型
+
+改版后加了一个 `tx_type`，在 Init 里就定下来：
+
+```tla
+Init ≜
+    ∧ v_nodes = NODES
+    ∧ tx_type ∈ {"Confirm", "Cancel"}
+    ...
+```
+
+现实里协调者不是"提前知道"结局的。它先发 Try，根据结果再决定 Confirm 还是 Cancel。
+
+这里在 Init 里就定下 `tx_type`，不是模拟现实，是切分验证空间。
+
+结局只有两种，互斥且穷尽。与其建模"先 Try 再按结果分支"，不如把两种结局各固定一次，分两次验证。所有执行路径最终都会落在其中一边，两边都验证过，等于全验证过。
+
+这样做还有个好处：状态空间从乘法变成加法。如果建模成"先 Try 再分支"，TLC 要在同一个搜索里同时考虑两条路；固定结局之后，每次只搜一半。
+
+定下来之后，两条分支的约束就不一样了：
+
+**Cancel 分支**：Cancel 的触发条件（超时）和 Try 到没到没有关系。所以 Try 和 Cancel 可以任意先后，每个节点独立。
+
+**Confirm 分支**：必须先让所有节点 Try 成功，才能发 Confirm。所以 `RequestConfirm` 的 guard 里有"所有节点都收到 Try"。
+
+这样 Cancel 分支就能表达真正的空回滚：某个节点先收到 Cancel，Try 还在路上或者已经丢了。
 
 ### 核心动作
 
-`ResponseTry` 是唯一会产生副作用的地方：
+`ResponseTry` 是唯一会增加资源的地方：
 
 ```tla
 ResponseTry(node) ≜
     ∧ Try ∈ mailbox[node]
     ∧ state[node] = Null
-    ∧ IF Cancel ∈ mailbox[node]
-      THEN
-            ∧ state' = [state EXCEPT ![node] = Cancel]
-            ∧ UNCHANGED ⟨mailbox, receive_can, resource, v_nodes⟩
-      ELSE
-            ∧ receive_can' = receive_can ∪ {node}
-            ∧ state' = [state EXCEPT ![node] = Try]
-            ∧ resource' = [resource EXCEPT
-                  ![node].available = @ - 1,
-                  ![node].frozen    = @ + 1]
-            ∧ UNCHANGED ⟨mailbox, v_nodes⟩
-    ∧ UNCHANGED ⟨sended_try, sended_confirm, sended_cancel, cost⟩
+    ∧ state' = [state EXCEPT ![node] = Try]
+    ∧ resource' = [resource EXCEPT
+          ![node].available = @ - 1,
+          ![node].frozen    = @ + 1]
+    ∧ UNCHANGED ⟨mailbox, v_nodes, cost, tx_type⟩
 ```
 
 两个 guard：`Try` 在收件箱里，`state` 还是 `Null`。
 
-如果 `Cancel` 也在收件箱里（说明 Cancel 先到），直接把状态设成 `Cancel`，不扣资源。这就是空回滚。
+第二个 guard 挡住了两种情况。已经 Try 过，幂等；已经 Cancel 过，说明 Try 迟到了，不能再冻结。
 
-如果 `state` 已经是 `Cancel`（说明 Cancel 执行过了），guard 不满足，动作不执行。这就是悬挂。
+原来那个 `IF Cancel ∈ mailbox[node]` 分支删掉了，因为 Cancel 先到时 `state` 已经被 `ResponseCancel` 改成 `Cancel`，`state[node] = Null` 自然不成立。
 
-`mailbox` 是集合，重复投递不会累积，响应侧又靠 `state` 的 guard 挡住重复执行，所以幂等也不需要额外处理。
-
-### 执行者为什么要先塞进 mailbox 再查
-
-现实里，执行者收到一条 RPC，RPC 的类型就决定了它调哪个方法。是 Try 就调 `try()`，是 Cancel 就调 `cancel()`，类型写在消息里，不用猜。
-
-规约里不是这样。消息先被塞进 `mailbox[node]`，响应动作再去集合里看现在有什么：
+`ResponseCancel` 是唯一会释放资源的地方：
 
 ```tla
-ResponseTry(node) ≜
-    ∧ Try ∈ mailbox[node]
-    ∧ state[node] = Null
-    ∧ IF Cancel ∈ mailbox[node]
-      THEN ...
-      ELSE ...
+ResponseCancel(node) ≜
+    ∧ Cancel ∈ mailbox[node]
+    ∧ state[node] ∈ {Null, Try}
+    ∧ state' = [state EXCEPT ![node] = Cancel]
+    ∧ resource' = [resource EXCEPT
+          ![node].available = @ + resource[node].frozen,
+          ![node].frozen    = 0]
+    ∧ UNCHANGED ⟨mailbox, v_nodes, cost, tx_type⟩
 ```
 
-这就是"一股脑塞进去，再回头看之前来过什么"。
+guard 是 `state ∈ {Null, Try}`，比 Try 宽一档。
 
-为什么要这么写？
+`state = Null` 的时候，`frozen` 是 0，`available + 0` 不变，只把状态改成 `Cancel`。这就是空回滚。
 
-因为到达顺序不确定。如果写成"收到 Try 就直接调 `ResponseTry`"，等于默认了 Try 一定先到，那空回滚和悬挂就表达不出来。
+`state = Try` 的时候，`frozen` 是 1，加回 `available`，正常解冻。
 
-把消息先放进集合，集合本身不关心顺序。响应动作再根据"集合里现在有什么"来决定行为：
+### 按节点发消息
 
-- 只有 Try → 正常进入 Try
-- Try 和 Cancel 都在 → 说明 Cancel 先到过，直接进 Cancel
-- 只有 Cancel → `ResponseTry` 的 guard 不满足，不执行
-
-同一个 `ResponseTry`，靠 `IF Cancel ∈ mailbox[node]` 这一个判断，覆盖了两种到达顺序。
-
-这和现实里不一样，但覆盖的范围比现实大。多的能罩住少的。
-
-### 三个 bool 补上"发过没有"
-
-`mailbox` 是集合，集合不记顺序，也不记次数。所以另开了三个布尔变量：
+请求动作全都带了一个 `node` 参数：
 
 ```tla
-RequestTry ≜
-    ...
-    ∧ sended_try' = TRUE
-
-RequestConfirm ≜
-    ∧ sended_try = TRUE ∧ sended_cancel = FALSE
-    ...
-    ∧ sended_confirm' = TRUE
-
-RequestCancel ≜
-    ∧ sended_try = TRUE ∧ sended_confirm = FALSE
-    ...
-    ∧ sended_cancel = TRUE
+RequestTry(node) ≜
+    ∧ Try ∉ mailbox[node]
+    ∧ mailbox' = [mailbox EXCEPT ![node] = @ ∪ {Try}]
+    ∧ UNCHANGED ⟨state, resource, v_nodes, cost, tx_type⟩
 ```
 
-三条约束：
+`Try ∉ mailbox[node]` 兼了两件事：保证同一节点只发一次，也省掉了一个"发过没有"的布尔变量。
 
-- Try 只能在最开始发一次
-- Confirm 必须在 Try 之后，而且 Cancel 还没发
-- Cancel 必须在 Try 之后，而且 Confirm 还没发
+`Next` 也改成按节点选：
 
-没有这三个 bool，集合分不清"Try 到底发过没有"，也拦不住"先 Confirm 再 Cancel"这种不合法的顺序。
+```tla
+Next ≜
+    ∃ node ∈ v_nodes:
+        ∨ RequestTry(node)
+        ∨ RequestConfirm(node)
+        ∨ RequestCancel(node)
+        ∨ ResponseTry(node)
+        ∨ ResponseConfirm(node)
+        ∨ ResponseCancel(node)
+```
 
-它们不负责"只发一次"的幂等（那是应用层和各节点自己的事），只保证规约里的调用顺序是合法的。这是最低限度的顺序保证。
+这样 A 可以是 Try 先到、B 是 Cancel 先到，同一个事务里两种顺序能同时出现。
+
+上一版做不到这一点，因为请求动作是原子的，所有节点一起变。
 
 ### 验证了什么
 
@@ -340,18 +358,30 @@ Liveness ≜
 
 ```
 Model checking completed. No error has been found.
-1122 states generated, 289 distinct states found
+3716 states generated, 656 distinct states found
 ```
+
+改版之后状态数比以前多，因为 `tx_type` 分了两条分支，而且每个节点的消息可以独立到达。
 
 ### 没建模的部分
 
-消息丢失没有单独建模，但它的后果已经被覆盖了。
+消息丢失没有单独建模，但"Try 没到"这个结果被覆盖了。
 
-消息丢失在规约里的表现只有两种：Try 没到，或者 Cancel 没到。第一种会走空回滚，第二种可以重发（`RequestCancel` 对时刻没有约束，想什么时候再发都行）。这两种情况都被 `mailbox` 是集合、`state` 是状态机这两点接住了。
+新版里，Cancel 可以先于 Try 到达。这时节点处理 Cancel 时 `state` 还是 `Null`，`frozen` 是 0，等于回滚了一个从没发生过的事务。空回滚就是这么来的。
 
-规约真正假设的是"消息可能任意晚到，也可能永远不到"。这比"丢掉一条"更宽松，所以丢一条自然也在里面。
+至于"永远不到"，规约里没有。每个请求动作都加了 `WF_vars`，只要一直可执行，最终一定被执行。模型里不存在"消息永久丢失"这种情况。
+
+要真建模丢失，得加一个"丢弃消息"的动作，或者把 `WF` 拿掉几个。暂时没做。
 
 网络分区确实没写。分区不是丢一条消息，而是一段时间内完全失联，协调者可能会误判对方已经死了，转而去走 Cancel。要建模这个，得加一个"连接状态"变量，让消息在某些状态下根本发不出去。规约里没有这一层。
+
+还有一处简化：规约里每个节点收到 Try 就自己冻结自己的资源，收件箱和资源是同一个 `node`。
+
+现实里不一定。接收 Try 的可能是个网关或者协调代理，真正管资源的在另一个服务里，中间还隔着一次 RPC。要建模这个，得再加一层转发，还要处理"A 收到了但 B 没收到"这类情况，复杂度会往上翻。
+
+但效果是一样的。不管中间转了几手，最终都是"某个资源被冻结了"或者"没冻结"。把收件和管资源合并成一个 `node`，覆盖的仍然是这个范围。
+
+只要网络最终能恢复、消息最终能送达，规约的结论就成立。
 
 协调者崩溃和持久化也没建模。它们属于实现层面，靠发件箱、对账、幂等表兜底，不是状态机能解决的。
 
