@@ -18,7 +18,7 @@
 ### 02 分布式事务
 
 - [x] [TCC：用状态机处理三类异常](./02-distributed-tx/01-tcc.md)：不建模超时，任意时刻可 Cancel，用状态覆盖空回滚和悬挂
-- [ ] Saga：补偿不是回滚
+- [x] [Saga：补偿不是回滚](./02-distributed-tx/02-saga.md)：软状态保护、超时取消，只有失败那步会出空回滚和悬挂
 - [ ] 事务发件箱与对账
 
 ### 03 TLA+
@@ -40,15 +40,22 @@ examples/
 ├── ddd_v1.py          User 聚合持有 AccountCenter 的第一版
 ├── ddd_v2.py          重构后：读写分离、汇率当参数传
 ├── router_example.py  v2 的 FastAPI 接口层
-└── tcc/
-    ├── TCC.tla        TCC 规约
-    └── TCC.cfg
+├── tcc/
+│   ├── TCC.tla        TCC 规约
+│   └── TCC.cfg
+└── saga/
+    ├── Saga.tla       Saga 规约
+    └── Saga.cfg
 ```
 
-TCC 规约的跑法：
+两个规约的跑法一样，在各自的目录里执行：
 
 ```
+# examples/tcc
 java -cp ~/tla2tools.jar tlc2.TLC -deadlock -config TCC.cfg TCC.tla
+
+# examples/saga
+java -cp ~/tla2tools.jar tlc2.TLC -deadlock -config Saga.cfg Saga.tla
 ```
 
 ## 说明
