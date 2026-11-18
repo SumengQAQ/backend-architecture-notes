@@ -30,6 +30,30 @@ Try 只做预留，不动真正的余额。所以中间状态对用户是可见�
 
 Confirm 和 Cancel 都必须幂等。协调者可能重试，也不能保证只调用一次。
 
+## 资源：可用和冻结
+
+TCC 的"预留"落到账上，是两个钱包：
+
+- 可用余额 `available`
+- 冻结余额 `frozen`
+
+一笔 100 的冻结，账上大概是这样的：
+
+| 阶段 | available | frozen |
+|---|---|---|
+| 初始 | 1000 | 0 |
+| Try | 900 | 100 |
+| Confirm | 900 | 0 |
+| Cancel | 1000 | 0 |
+
+Try 从 `available` 挪到 `frozen`，Confirm 把 `frozen` 清零，Cancel 原路退回去。
+
+钱在任何时刻都在账上，只是"能不能用"不一样。
+
+这就是 TCC 和 Saga 最根本的差别。Saga 没有 `frozen` 这个状态，它是直接扣掉，出问题再补一笔反向操作。所以 Saga 的补偿是"再转一次账"，TCC 的补偿是"解冻"。
+
+两者可靠性差挺多。解冻只是同一个账户里挪数字，几乎不会失败；反向转账要走完整的支付链路，可能又失败一次。
+
 ## 三类异常
 
 ### 空回滚
@@ -85,16 +109,24 @@ Confirm 和 Cancel 都可能被调用多次。同一笔扣款执行两次，钱�
 
 ```sql
 CREATE TABLE branch_tx (
-    global_tx_id BIGINT      NOT NULL,
-    branch_id    BIGINT      NOT NULL,
-    status       TINYINT     NOT NULL,   -- 1=TRYING 2=TRIED 3=CONFIRMED 4=CANCELLED
-    updated_at   DATETIME    NOT NULL,
-    PRIMARY KEY (global_tx_id, branch_id),
+    id           BIGINT        NOT NULL,   -- 雪花 ID，作主键
+    global_tx_id BIGINT        NOT NULL,
+    branch_id    BIGINT        NOT NULL,
+    amount       DECIMAL(18,2) NOT NULL,   -- 这次冻结了多少
+    status       TINYINT       NOT NULL,   -- 1=TRIED 2=CONFIRMED 3=CANCELLED
+    updated_at   DATETIME      NOT NULL,
+    PRIMARY KEY (id),
     UNIQUE KEY uk_branch (global_tx_id, branch_id)
 );
 ```
 
-唯一索引负责"同一笔分支事务只有一行"，状态字段负责"这行现在走到哪一步"。
+主键用一个独立的 `bigint`，不用 `(global_tx_id, branch_id)` 做联合主键。
+
+InnoDB 里二级索引的叶子存的是主键。主键是两个 `bigint`，每个二级索引都要多存 16 字节；换成单个 `bigint`，只多 8 字节。索引一多，差距就出来了。而且雪花 ID 是趋势递增的，插入时页分裂也少。
+
+唯一索引 `uk_branch` 负责"同一笔分支事务只有一行"，状态字段负责"这行现在走到哪一步"。
+
+`amount` 这一列不能省。Cancel 的时候要靠它知道退多少，Confirm 的时候要靠它核对金额有没有对错。
 
 四类请求对应的处理：
 
@@ -149,10 +181,10 @@ java -cp ~/tla2tools.jar tlc2.TLC -deadlock -config TCC.cfg TCC.tla
 
 ```tla
 RequestCancel ≜
-    ∧ sended_try = TRUE ∧ sended_confrim = FALSE
+    ∧ sended_try = TRUE ∧ sended_confirm = FALSE
     ∧ mailbox' = [node ∈ v_nodes ↦ mailbox[node] ∪ {Cancel}]
     ∧ sended_cancel = TRUE
-    ∧ UNCHANGED ⟨receive_can, state, resource, v_nodes, sended_try, sended_confrim⟩
+    ∧ UNCHANGED ⟨receive_can, state, resource, v_nodes, sended_try, sended_confirm⟩
 ```
 
 `RequestCancel` 只要求"Try 发过、Confirm 没发"，对时刻没有任何约束。
@@ -172,9 +204,11 @@ ResponseTry(node) ≜
       ELSE
             ∧ receive_can' = receive_can ∪ {node}
             ∧ state' = [state EXCEPT ![node] = Try]
-            ∧ resource' = [resource EXCEPT ![node] = @ - 1]
+            ∧ resource' = [resource EXCEPT
+                  ![node].available = @ - 1,
+                  ![node].frozen    = @ + 1]
             ∧ UNCHANGED ⟨mailbox, v_nodes⟩
-    ∧ UNCHANGED ⟨sended_try, sended_confrim, sended_cancel⟩
+    ∧ UNCHANGED ⟨sended_try, sended_confirm, sended_cancel, cost⟩
 ```
 
 两个 guard：`Try` 在收件箱里，`state` 还是 `Null`。
@@ -225,13 +259,13 @@ RequestTry ≜
     ...
     ∧ sended_try' = TRUE
 
-RequestConfrim ≜
+RequestConfirm ≜
     ∧ sended_try = TRUE ∧ sended_cancel = FALSE
     ...
-    ∧ sended_confrim' = TRUE
+    ∧ sended_confirm' = TRUE
 
 RequestCancel ≜
-    ∧ sended_try = TRUE ∧ sended_confrim = FALSE
+    ∧ sended_try = TRUE ∧ sended_confirm = FALSE
     ...
     ∧ sended_cancel = TRUE
 ```
@@ -248,51 +282,65 @@ RequestCancel ≜
 
 ### 验证了什么
 
-一共三条，都跑过。
+四条，都跑过。
 
-活性：
-
-```tla
-Liveness ≜
-    ∧ ◇□(∀ node ∈ v_nodes: resource[node] = 0)
-    ∧ ∨ ◇□(∀ node ∈ v_nodes: state[node] = Confrim)
-      ∨ ◇□(∀ node ∈ v_nodes: state[node] = Cancel)
-```
-
-资源最终全部归还，所有节点的状态最终统一收敛到 Confrim 或者全部收敛到 Cancel。
-
-安全性：
+安全性，每个节点的资源不会越界：
 
 ```tla
-ResourceBounded ≜ ∀ node ∈ v_nodes: resource[node] >= -1 /\ resource[node] <= 0
+ResourceBounded ≜
+    ∀ node ∈ v_nodes:
+        ∧ resource[node].available ∈ 1‥2
+        ∧ resource[node].frozen ∈ 0‥1
 ```
 
-初始是 0，Try 之后是 -1，Confirm 或 Cancel 之后回到 0。如果某个节点被重复预留，就会掉到 -2，这条会立刻抓到。
+初始是 2 和 0，Try 之后是 1 和 1，Confirm 或 Cancel 之后回到 2 和 0。
+
+守恒，钱不会凭空出现：
+
+```tla
+ResourceConservation ≜
+    cost + SumAvailable(v_nodes) + SumFrozen(v_nodes) = Cardinality(v_nodes) * 2
+```
+
+已经花掉的 `cost`、还能用的 `available`、冻结着的 `frozen`，三者加起来永远等于初始总量。
+
+这条比"余额不为负"强。它同时堵住了两个方向：钱不会多出来，也不会少掉。
 
 状态单调性：
 
 ```tla
 StateStable ≜
     ∀ node ∈ NODES:
-        IF node ∈ v_nodes
-        THEN ∧ (state[node] = Confrim ⇒ □(state[node] = Confrim))
-             ∧ (state[node] = Cancel ⇒ □(state[node] = Cancel))
-        ELSE TRUE
+        node ∈ v_nodes ⇒
+            ∧ (state[node] = Confirm ⇒ □(state[node] = Confirm))
+            ∧ (state[node] = Cancel  ⇒ □(state[node] = Cancel))
 ```
 
 两个终态要分开写。如果合成一个：
 
 ```tla
-(Confrim ∨ Cancel) ⇒ □(Confrim ∨ Cancel)
+(Confirm ∨ Cancel) ⇒ □(Confirm ∨ Cancel)
 ```
 
-那"先 Confrim，之后再变成 Cancel，然后一直 Cancel"这条路径也会被判定为满足。因为它只要求之后一直在集合里，没要求停在哪一个。
+那"先 Confirm，之后再变成 Cancel，然后一直 Cancel"这条路径也会被判定为满足。因为它只要求之后一直在集合里，没要求停在哪一个。
 
-分开写之后，这两条路径都被排除：已经 Confrim 的不能再变 Cancel，反过来也一样。
+活性：
+
+```tla
+Liveness ≜
+    ∨ ◇□(∀ node ∈ v_nodes: state[node] = Confirm)
+    ∨ ◇□(∀ node ∈ v_nodes: state[node] = Cancel)
+```
+
+所有节点最终收敛到同一个终态。
+
+之前还有一条"资源最终归零"，现在删了。因为 `ResourceConservation` 已经蕴含了它：`cost` 只会增加，`available` 和 `frozen` 只在节点之间挪，总量永远不变。归零是守恒加活性的推论，不用单独写。
+
+跑的结果：
 
 ```
 Model checking completed. No error has been found.
-18 states generated, 9 distinct states found
+1122 states generated, 289 distinct states found
 ```
 
 ### 没建模的部分
@@ -317,4 +365,4 @@ Model checking completed. No error has been found.
 
 代价是不能再枚举"任意规模的参与者集合"，只能验证"全部节点参与"这一种情况。要保留枚举，得把 `state`、`mailbox`、`resource` 的域都改成 `NODES`，`v_nodes` 只用来标记哪些节点参与。改动会大一些，暂时没做。
 
-另外，规约没有建模消息丢失、网络分区、协调者崩溃。这些属于工程实现层面，靠发件箱、对账、幂等表兜底，不是状态机本身能解决的。
+这一条是妥协，不是最优解。理想情况下应该保留 `v_nodes` 的枚举，覆盖任意规模的参与者。
