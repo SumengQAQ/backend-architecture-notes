@@ -363,6 +363,40 @@ Model checking completed. No error has been found.
 
 改版之后状态数比以前多，因为 `tx_type` 分了两条分支，而且每个节点的消息可以独立到达。
 
+### WF 的量词放哪儿
+
+```tla
+∀ node ∈ NODES: WF_vars(RequestTry(node))
+WF_vars(∃ node ∈ NODES: RequestTry(node))
+```
+
+看着差不多，意思不一样。
+
+第一行：每个节点的动作都公平。谁持续可执行，谁就必须最终执行。
+
+第二行：这个析取公平。只要"至少有一个能发"，就最终会有一次发送，但不指定是谁。
+
+小例子：
+
+```tla
+VARIABLES x, y
+Init ≜ x = 0 ∧ y = 0
+A ≜ x' = x + 1 ∧ UNCHANGED y
+B ≜ y' = y + 1 ∧ UNCHANGED x
+
+\* x、y 都增长
+Spec1 ≜ Init ∧ □[A ∨ B]_⟨x,y⟩ ∧ WF(A) ∧ WF(B)
+
+\* 可以一直选 A，y 永远是 0
+Spec2 ≜ Init ∧ □[A ∨ B]_⟨x,y⟩ ∧ WF(A ∨ B)
+```
+
+`Spec2` 里 `A ∨ B` 一直可执行，WF 保证它无限次执行，但每次都可以选 A。`B` 被饿死。
+
+TCC 里用第二种写法居然也跑得通，因为 `RequestTry` 的 guard 是 `Try ∉ mailbox[node]`，每个节点只能执行一次。N1 执行完之后它的 `RequestTry` 就不可执行了，可执行集合只剩 N2，WF 只能逼着 N2 执行。
+
+换成可重复执行的动作就不行。所以还是写 `∀` 稳一点，语义一眼能看出来。
+
 ### 没建模的部分
 
 消息丢失没有单独建模，但"Try 没到"这个结果被覆盖了。
