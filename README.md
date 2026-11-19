@@ -1,6 +1,6 @@
 # backend-architecture-notes
 
-![notes](https://img.shields.io/badge/notes-5-4a7c59)
+![notes](https://img.shields.io/badge/notes-6-4a7c59)
 ![focus](https://img.shields.io/badge/focus-DDD%20%C2%B7%20Distributed%20Tx%20%C2%B7%20TLA%2B-555)
 
 后端架构笔记：DDD 落地取舍、分布式事务、TLA+ 形式化验证。
@@ -19,7 +19,7 @@
 
 - [x] [TCC：用状态机处理三类异常](./02-distributed-tx/01-tcc.md)：不建模超时，任意时刻可 Cancel，用状态覆盖空回滚和悬挂
 - [x] [Saga：补偿不是回滚](./02-distributed-tx/02-saga.md)：软状态保护、超时取消，只有失败那步会出空回滚和悬挂
-- [ ] 事务发件箱与对账
+- [x] [Outbox：事务发件箱模式](./02-distributed-tx/03-outbox.md)：状态只要四种，Processing 用行锁替掉，先投递再改状态
 
 ### 03 TLA+
 
@@ -43,12 +43,15 @@ examples/
 ├── tcc/
 │   ├── TCC.tla        TCC 规约
 │   └── TCC.cfg
-└── saga/
-    ├── Saga.tla       Saga 规约
-    └── Saga.cfg
+├── saga/
+│   ├── Saga.tla       Saga 规约
+│   └── Saga.cfg
+└── outbox/
+    ├── Outbox.tla     Outbox 规约
+    └── Outbox.cfg
 ```
 
-两个规约的跑法一样，在各自的目录里执行：
+三个规约的跑法一样，在各自的目录里执行：
 
 ```
 # examples/tcc
@@ -56,6 +59,9 @@ java -cp ~/tla2tools.jar tlc2.TLC -deadlock -config TCC.cfg TCC.tla
 
 # examples/saga
 java -cp ~/tla2tools.jar tlc2.TLC -deadlock -config Saga.cfg Saga.tla
+
+# examples/outbox
+java -cp ~/tla2tools.jar tlc2.TLC -deadlock -config Outbox.cfg Outbox.tla
 ```
 
 ## 说明
