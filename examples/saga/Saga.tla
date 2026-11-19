@@ -81,14 +81,15 @@ Init ≜
 --------------------------------------------------------------------------
 
 AdvanceDoing ≜
-    ∧ period = Doing
+    \* ∧ period = Doing
     ∧ will_do ≤ last_step
     \* 上一步做完才能发下一步，第一步不用检查
     ∧ IF will_do = 1
         THEN TRUE
-        ELSE step_state[order_to_step[will_do - 1]] = Done
+        ELSE step_state[order_to_step[will_do - 1]] ∈ {Done, Undone}
     ∧ LET step ≜ order_to_step[will_do]
-      IN  ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
+      IN  ∧ ¬(∃ x ∈ mailbox[StepToNode[step]]: x.type = Undo)
+          ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
               @ ∪ {[type |-> Do, step |-> step]}]
           ∧ will_do' = will_do + 1
           ∧ UNCHANGED ⟨tx_type, last_step, node_to_step,
@@ -96,20 +97,25 @@ AdvanceDoing ≜
                        will_undo, period⟩
 
 AdvanceUndoing ≜
-    ∧ period ∈ {Doing, Undoing}
+    \* ∧ period ∈ {Doing, Undoing}
     ∧ tx_type = NeedUndo
     ∧ will_undo ≥ 1
-    ∧ will_do = last_step + 1
+    ∧ (will_do = last_step ∨ will_do = last_step + 1)
+    \* 补偿也必须是串行的
+    ∧ IF will_undo = last_step
+        THEN TRUE
+        ELSE step_state[order_to_step[will_undo + 1]] = Undone
     ∧ LET step ≜ order_to_step[will_undo]
-      IN  ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
+      IN  ∧ ¬(∃ x ∈ mailbox[StepToNode[step]]: x.type = Do)
+          ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
                 @ ∪ {[type |-> Undo, step |-> step]}]
           ∧ will_undo' = will_undo - 1
-          ∧ period' = Undoing
+          \* ∧ period' = Undoing
           ∧ UNCHANGED ⟨tx_type, last_step, node_to_step,
-                       order_to_step, cost, step_state, resource, will_do⟩
+                       order_to_step, cost, step_state, resource, will_do, period⟩
 
 AdvanceFinish ≜
-    ∧ period ∈ {Doing, Undoing}
+    ∧ period ≠ Finish
     ∧ will_do = last_step + 1
     ∧ will_undo = 0
     ∧ ∀ node ∈ NODES: mailbox[node] = {}
@@ -196,4 +202,25 @@ Spec ≜
     ∧ WF_vars(AdvanceFinish)
     ∧ ∀ node ∈ NODES: WF_vars(ResponseDo(node))
     ∧ ∀ node ∈ NODES: WF_vars(ResponseUndo(node))
+
+\* 看看是否有do和undo都到了，但是没处理的情况
+\* 对于所有的node和step，这个step的do和undo不可能在Null的状态下同时存在
+NoHandleDoAndUndo ≜
+    ∀ node ∈ NODES: ∀ step ∈ STEPS: 
+        ¬({[type ↦ Do, step ↦ step], [type ↦ Undo, step ↦ step]} ⊆ mailbox[node] ∧ step_state[step] = Null)
+\* State 3: <AdvanceUndoing line 99, col 5 to line 109, col 74 of module Saga>
+\* /\ will_undo = 0
+\* /\ tx_type = "NeedUndo"
+\* /\ will_do = 2
+\* /\ resource = [S1 |-> 2, S2 |-> 2, S3 |-> 2]
+\* /\ period = "Undoing"
+\* /\ cost = 0
+\* /\ last_step = 1
+\* /\ step_state = [S1 |-> "Null", S2 |-> "Null", S3 |-> "Null"]
+\* /\ node_to_step = [N1 |-> {}, N2 |-> {"S1"}]
+\* /\ mailbox = [ N1 |-> {}, N2 |-> {[step |-> "S1", type |-> "Do"], [step |-> "S1", type |-> "Undo"]} ]
+\* /\ order_to_step = <<"S1">>
+
+\* S1怎么会收到了do和undo，但是一个都没处理呢？这和现实不符
+\* 现在是do和undo可以同时到，但是可以选择先处理do或者先处理undo
 ====

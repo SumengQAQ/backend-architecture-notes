@@ -103,20 +103,24 @@ StepToNode ≜ [s ∈ UsedSteps ↦ CHOOSE n ∈ NODES: s ∈ node_to_step[n]]
 
 ```tla
 AdvanceDoing ≜
-    ∧ period = Doing
     ∧ will_do ≤ last_step
     ∧ IF will_do = 1
         THEN TRUE
-        ELSE step_state[order_to_step[will_do - 1]] = Done
+        ELSE step_state[order_to_step[will_do - 1]] ∈ {Done, Undone}
     ∧ LET step ≜ order_to_step[will_do]
-      IN  ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
+      IN  ∧ ¬(∃ x ∈ mailbox[StepToNode[step]]: x.type = Undo)
+          ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
               @ ∪ {[type |-> Do, step |-> step]}]
           ∧ will_do' = will_do + 1
 ```
 
-消息先进 `mailbox`，节点再从 `mailbox` 里取。如果发送和执行合成一个动作，到达乱序就表达不出来了，空回滚和悬挂也就没地方发生。
+`mailbox` 可以理解成"已经到达节点、还没处理"的那一层。消息放进去，节点再从里面取。如果发送和执行合成一个动作，到达乱序就表达不出来了。
 
-中间那个判断是串行的来源。第 `will_do - 1` 步做完，才允许发第 `will_do` 步。第一步没有前驱，跳过。
+那个 `¬(∃ ... Undo)` 是说，同一个节点上如果有还没处理的 undo，就先别发 do。发 undo 的时候也有一条对称的，要求没有待处理的 do。两条合起来，同一个步骤的 do 和 undo 不会同时停在队列里。
+
+中间那个判断是串行的来源。第 `will_do - 1` 步做完，或者已经被撤了，才允许发第 `will_do` 步。第一步没有前驱，跳过。
+
+"已经被撤了"也要放行，因为协调者不知道对面的 do 还没到。它按顺序发，发到第 k 步的时候，前面几步在它眼里都是成功的。有的可能还在路上，undo 先到就被空回滚掉了，状态是 `Undone`，但协调者照样往下发。
 
 不写这一条会怎样？协调者可以一口气把四条 do 全发出去，全都堆在队列里。这时候跑 TLC 也能通过，但那个模型里四步是并行执行的，不是 Saga。
 
@@ -126,15 +130,17 @@ AdvanceDoing ≜
 
 ```tla
 AdvanceUndoing ≜
-    ∧ period ∈ {Doing, Undoing}
     ∧ tx_type = NeedUndo
     ∧ will_undo ≥ 1
-    ∧ will_do = last_step + 1
+    ∧ (will_do = last_step ∨ will_do = last_step + 1)
+    ∧ IF will_undo = last_step
+        THEN TRUE
+        ELSE step_state[order_to_step[will_undo + 1]] = Undone
     ∧ LET step ≜ order_to_step[will_undo]
-      IN  ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
+      IN  ∧ ¬(∃ x ∈ mailbox[StepToNode[step]]: x.type = Do)
+          ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
                 @ ∪ {[type |-> Undo, step |-> step]}]
           ∧ will_undo' = will_undo - 1
-          ∧ period' = Undoing
 ```
 
 ### 每步一个状态机
@@ -182,21 +188,66 @@ Undone  回滚过了
 
 这里有个容易走错的地方。一开始想的是"do 来的时候看看 mailbox 里有没有对应的 undo，有就直接标记处理完"。问题是 undo 可能还在路上，马上就到。这时候 do 该正常执行，等 undo 来了再补偿。判断依据只能是这一步的状态，不能是队列里有没有某条消息。
 
-### 补偿之前要不要等
+### 什么时候能开始撤
 
-补偿是逆序发起的，但消息到达是乱序的。发 undo 之前要决定一件事：前面那些步骤，是等它们做完才撤，还是发了就开始撤。
+补偿是逆序发起的。发起之前要定两件事：什么时候能开始，撤的时候要不要等。
 
-TCC 那边没有这个选择。Cancel 到达时，Try 可能已经处理了，也可能还没。两种都能接：Try 做了就正常解冻，Try 没做就空回滚。所以 TCC 的 Cancel 是宽松的，谁来都接，因为分支事务之间没有顺序，不用等谁。
+先说开始。
 
-Saga 有顺序，宽松不起来。第 2 步没做完就撤第 1 步，撤到一半第 2 步又成功了，账就乱了。
+TCC 那边没有这个问题。Cancel 到达时，Try 可能已经处理了，也可能还没。两种都能接：Try 做了就正常解冻，Try 没做就空回滚。所以 TCC 的 Cancel 是宽松的，谁来都接，因为分支事务之间没有顺序，不用等谁。
 
-"等"是靠前面那节的串行约束实现的：前一步做完才发下一步。所以等到 do 全部发完，前面的步骤一定都是 `Done`。唯一不确定的是最后一步，do 发出去了，但可能还在路上。
+Saga 有顺序，前面那些步骤必须等。第 2 步没做完就撤第 1 步，撤到一半第 2 步又成功了，账就乱了。
 
-guard 的核心就一条，do 全发完，`will_do = last_step + 1`。
+前面那节的串行约束保证了一点：第 k 步能发出去，说明第 k-1 步已经有结论了，要么 `Done`，要么 `Undone`。两种都行，因为 `Undone` 表示它的 do 还没到、先被撤了，协调者并不知道。
 
-为什么不能更早，比如只发出前两步就开始撤？后面那几步还没发，undo 先到，撤的就是从来没执行过的步骤。这些步骤本来一定会执行成功。
+唯一不确定的是最后一步。它的 do 可能还在路上，协调者等不到响应，直接开始撤。
 
-为什么不能等所有 do 都处理完？因为最后一步可能永远等不到结果，如果硬等的话就可能卡死了。
+所以条件是两个之一：
+
+```tla
+∧ (will_do = last_step ∨ will_do = last_step + 1)
+```
+
+`will_do = last_step`，说明最后一步的 do 还没到节点。`will_do = last_step + 1`，说明发了，但可能还在队列里没处理。
+
+不能再早。`will_do` 要是停在 `last_step - 1`，说明倒数第二步都还没发，undo 先到就撤了一个从没尝试过的步骤。所以最多提前到最后一步。
+
+也不能等所有 do 都处理完。最后一步可能永远等不到结果，硬等就卡死了。
+
+再说撤的顺序。
+
+补偿本身也要串行。后一步撤完，才能撤前一步：
+
+```tla
+∧ IF will_undo = last_step
+    THEN TRUE
+    ELSE step_state[order_to_step[will_undo + 1]] = Undone
+```
+
+第一条不用等，它是第一个撤的。后面的都要看后一步有没有变成 `Undone`。
+
+这条是后加的。之前补偿是乱序发出的，会出现"第 1 步撤了、第 3 步还没撤"的中间状态。现实里协调者是一条一条发的，不会这样。
+
+还有个条件，发 undo 之前要求目标节点没有待处理的 do：
+
+```tla
+∧ ¬(∃ x ∈ mailbox[StepToNode[step]]: x.type = Do)
+```
+
+配合发 do 那节的对称条件，同一个步骤的两条消息不会同时停在队列里。
+
+这件事单独拿出来当不变式验证过：
+
+```tla
+NoHandleDoAndUndo ≜
+    ∀ node ∈ NODES: ∀ step ∈ STEPS:
+        ¬({[type ↦ Do, step ↦ step], [type ↦ Undo, step ↦ step]} ⊆ mailbox[node]
+          ∧ step_state[step] = Null)
+```
+
+意思是：不可能出现"同一个步骤的 do 和 undo 都在队列里，而且这一步从来没处理过"。
+
+为什么这条成立？因为节点收到一条就处理一条。要么先收到 do，处理完再收到 undo，是正常补偿；要么先收到 undo，处理完再收到 do，是空回滚加悬挂。两种顺序都不会让两条消息同时在队列里排队。
 
 ### 探针
 
@@ -224,15 +275,16 @@ TLC 报"没有错误"的时候，有两种可能：系统是对的，或者模�
 
 ### 验证了什么
 
-三条不变式：
+四条不变式：
 
 - 每个步骤的资源在 1 到 2 之间，而且和状态严格对应。`Done` 的时候是 1，其余是 2
 - `cost` 恰好等于当前处于 `Done` 的步骤数，补偿一次就减一次，记账不会错
 - 走到 Finish 的时候，每个步骤的终态符合 Init 里选的那个结局
+- 同一个步骤的 do 和 undo 不会同时停在队列里，`NoHandleDoAndUndo`
 
 一条属性：不管怎么乱序，最终一定会走到 Finish。
 
-2 个节点 3 个步骤的配置，生成 1540 个状态，去重后 1016 个。3 个节点 3 个步骤，生成 4446 个，去重后 2862 个。
+2 个节点 3 个步骤的配置，生成 1116 个状态，去重后 944 个。3 个节点 3 个步骤，生成 3222 个，去重后 2646 个。
 
 ### 没建模的部分
 
