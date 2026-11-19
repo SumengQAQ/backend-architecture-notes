@@ -108,13 +108,13 @@ AdvanceDoing ≜
         THEN TRUE
         ELSE step_state[order_to_step[will_do - 1]] ∈ {Done, Undone}
     ∧ LET step ≜ order_to_step[will_do]
-      IN  ∧ ¬(∃ x ∈ mailbox[StepToNode[step]]: x.type = Undo)
-          ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
+      IN  ∧ ¬(∃ x ∈ inbox[StepToNode[step]]: x.type = Undo)
+          ∧ inbox' = [inbox EXCEPT ![StepToNode[step]] =
               @ ∪ {[type |-> Do, step |-> step]}]
           ∧ will_do' = will_do + 1
 ```
 
-`mailbox` 可以理解成"已经到达节点、还没处理"的那一层。消息放进去，节点再从里面取。如果发送和执行合成一个动作，到达乱序就表达不出来了。
+`inbox` 就是收件箱。协调者写进去，等于把消息放到了执行者的收件箱里，节点再从里面按顺序取。如果发送和执行合成一个动作，到达乱序就表达不出来了。
 
 那个 `¬(∃ ... Undo)` 是说，同一个节点上如果有还没处理的 undo，就先别发 do。发 undo 的时候也有一条对称的，要求没有待处理的 do。两条合起来，同一个步骤的 do 和 undo 不会同时停在队列里。
 
@@ -137,8 +137,8 @@ AdvanceUndoing ≜
         THEN TRUE
         ELSE step_state[order_to_step[will_undo + 1]] = Undone
     ∧ LET step ≜ order_to_step[will_undo]
-      IN  ∧ ¬(∃ x ∈ mailbox[StepToNode[step]]: x.type = Do)
-          ∧ mailbox' = [mailbox EXCEPT ![StepToNode[step]] =
+      IN  ∧ ¬(∃ x ∈ inbox[StepToNode[step]]: x.type = Do)
+          ∧ inbox' = [inbox EXCEPT ![StepToNode[step]] =
                 @ ∪ {[type |-> Undo, step |-> step]}]
           ∧ will_undo' = will_undo - 1
 ```
@@ -186,7 +186,7 @@ Undone  回滚过了
 
 空回滚的时候资源不变，但要记住"这一步已经撤过了"。不记的话，后面迟到的 do 会被当成第一次执行，悬挂就漏了。
 
-这里有个容易走错的地方。一开始想的是"do 来的时候看看 mailbox 里有没有对应的 undo，有就直接标记处理完"。问题是 undo 可能还在路上，马上就到。这时候 do 该正常执行，等 undo 来了再补偿。判断依据只能是这一步的状态，不能是队列里有没有某条消息。
+这里有个容易走错的地方。一开始想的是"do 来的时候看看 inbox 里有没有对应的 undo，有就直接标记处理完"。问题是 undo 可能还在路上，马上就到。这时候 do 该正常执行，等 undo 来了再补偿。判断依据只能是这一步的状态，不能是队列里有没有某条消息。
 
 ### 什么时候能开始撤
 
@@ -210,6 +210,8 @@ Saga 有顺序，前面那些步骤必须等。第 2 步没做完就撤第 1 步
 
 `will_do = last_step`，说明最后一步的 do 还没到节点。`will_do = last_step + 1`，说明发了，但可能还在队列里没处理。
 
+前者是直接往收件箱里塞 undo，等于让执行者先收到 undo。协调者不知道自己该不该等，所以干脆不等。
+
 不能再早。`will_do` 要是停在 `last_step - 1`，说明倒数第二步都还没发，undo 先到就撤了一个从没尝试过的步骤。所以最多提前到最后一步。
 
 也不能等所有 do 都处理完。最后一步可能永远等不到结果，硬等就卡死了。
@@ -231,7 +233,7 @@ Saga 有顺序，前面那些步骤必须等。第 2 步没做完就撤第 1 步
 还有个条件，发 undo 之前要求目标节点没有待处理的 do：
 
 ```tla
-∧ ¬(∃ x ∈ mailbox[StepToNode[step]]: x.type = Do)
+∧ ¬(∃ x ∈ inbox[StepToNode[step]]: x.type = Do)
 ```
 
 配合发 do 那节的对称条件，同一个步骤的两条消息不会同时停在队列里。
@@ -241,7 +243,7 @@ Saga 有顺序，前面那些步骤必须等。第 2 步没做完就撤第 1 步
 ```tla
 NoHandleDoAndUndo ≜
     ∀ node ∈ NODES: ∀ step ∈ STEPS:
-        ¬({[type ↦ Do, step ↦ step], [type ↦ Undo, step ↦ step]} ⊆ mailbox[node]
+        ¬({[type ↦ Do, step ↦ step], [type ↦ Undo, step ↦ step]} ⊆ inbox[node]
           ∧ step_state[step] = Null)
 ```
 
