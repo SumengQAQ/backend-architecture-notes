@@ -26,7 +26,5 @@ Spec ≜ Init ∧ □[Next]_allocation
 \* 和 Init 里的约束说的是同一件事，换一种写法验证
 StateOk ≜
     ∧ ∀ people ∈ People: allocation[people] ≠ {}
-    ∧ ∀ item ∈ Item: ∀ p1 ∈ People: ∀ p2 ∈ People \ {p1}:
-        ∨(item ∈ allocation[p1] ∧ item ∉ allocation[p2])
-        ∨(item ∉ allocation[p1] ∧ item ∈ allocation[p2])
+    ∧ ∀ item ∈ Item: ∃ p1 ∈ People: item ∈ allocation[p1] ∧ ∀ p2 ∈ People \ {p1}: item ∉ allocation[p2]
 ====

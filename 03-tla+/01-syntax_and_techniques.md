@@ -62,14 +62,25 @@ Init ≜
 ```tla
 StateOk ≜
     ∧ ∀ people ∈ People: allocation[people] ≠ {}
-    ∧ ∀ item ∈ Item: ∀ p1 ∈ People: ∀ p2 ∈ People \ {p1}:
-        ∨ (item ∈ allocation[p1] ∧ item ∉ allocation[p2])
-        ∨ (item ∉ allocation[p1] ∧ item ∈ allocation[p2])
+    ∧ ∀ item ∈ Item: ∃ p1 ∈ People:
+        item ∈ allocation[p1] ∧ ∀ p2 ∈ People \ {p1}: item ∉ allocation[p2]
 ```
 
-任取两个不同的人，某个 item 恰好在其中一个人手里。两个分支分别是"在 p1 不在 p2"和"不在 p1 在 p2"，都不满足的话，要么两人都拿着，要么两人都没拿，两种都被挡掉。
+每个 item 找到一个人拿着它，其他所有人都不拿。
 
-一开始写的是 `¬(∃ item: ∃ p1, p2: item ∈ allocation[p1] ∧ item ∈ allocation[p2])`，只挡住了"两个人同时拿"，没挡住"谁都没拿"。而且"不存在一个……"这种句式在 TLA+ 里要套三层 `∃`，读起来也费劲。写成 `∀` 一次把两边都覆盖了。
+中间试过一版写成"任意两个人里恰好一个人拿"：
+
+```tla
+∀ item ∈ Item: ∀ p1 ∈ People: ∀ p2 ∈ People \ {p1}:
+    ∨ (item ∈ allocation[p1] ∧ item ∉ allocation[p2])
+    ∨ (item ∉ allocation[p1] ∧ item ∈ allocation[p2])
+```
+
+两个人时碰巧对，三个人就崩了。物品分给 A 之后，B 和 C 这一对谁都没拿，两个分支全假，不变式直接违反。
+
+"恰好一个人拿"这件事，得先把那个人找出来，再排除其他人。`∃` 负责找，`∀` 负责排除。
+
+更早还写过 `¬(∃ item: ∃ p1, p2: item ∈ allocation[p1] ∧ item ∈ allocation[p2])`，那个只挡住"两个人同时拿"，没挡住"谁都没拿"。
 
 `Init` 里那三条约束和 `StateOk` 是同一件事的两种写法。前者在构造初始状态时限制取值，后者拿来当不变式检查。它们限制的是同一个集合，所以互换也成立。
 
