@@ -71,7 +71,7 @@ StateOk ≜
 
 一开始写的是 `¬(∃ item: ∃ p1, p2: item ∈ allocation[p1] ∧ item ∈ allocation[p2])`，只挡住了"两个人同时拿"，没挡住"谁都没拿"。而且"不存在一个……"这种句式在 TLA+ 里要套三层 `∃`，读起来也费劲。写成 `∀` 一次把两边都覆盖了。
 
-Init 里那三条约束和 `StateOk` 说的是同一件事，把 Init 的约束换成 `StateOk` 再跑，一样通过。
+`Init` 里那三条约束和 `StateOk` 是同一件事的两种写法。前者在构造初始状态时限制取值，后者拿来当不变式检查。它们限制的是同一个集合，所以互换也成立。
 
 完整文件：[examples/tla+/Allocation.tla](../examples/tla+/Allocation.tla)
 
