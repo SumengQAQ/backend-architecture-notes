@@ -1,6 +1,6 @@
 # backend-architecture-notes
 
-![notes](https://img.shields.io/badge/notes-7-4a7c59)
+![notes](https://img.shields.io/badge/notes-8-4a7c59)
 ![focus](https://img.shields.io/badge/focus-DDD%20%C2%B7%20Distributed%20Tx%20%C2%B7%20TLA%2B-555)
 
 后端架构笔记：DDD 落地取舍、分布式事务、TLA+ 形式化验证。
@@ -24,7 +24,7 @@
 ### 03 TLA+
 
 - [x] [语法与技巧](./03-tla+/01-syntax_and_techniques.md)：常量转变量、多重集分配、状态空间切分、强弱公平性、探针
-- [ ] TLA+ 能验证什么，不能验证什么
+- [x] [能验证什么，不能验证什么](./03-tla+/02-what_and_what_not.md)：不变式、时序、精化的能力，以及抽象、公平性、代码一致性上的边界
 - [ ] 一个消息队列规约的解读
 
 ### 04 系统设计
