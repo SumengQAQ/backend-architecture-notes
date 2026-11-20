@@ -306,13 +306,13 @@ def execute_transfer_v2(self, from_uid, to_uid, from_account_id, to_account_id, 
         from_delta = latest_from.balance - original_from.balance
         to_delta = latest_to.balance - original_to.balance
 
-        # 版本号用事务外那次读的（from_account / to_account），不是 latest_*
+        # 币种用事务外那次读的（from_account / to_account），不是 latest_*
         if from_account_id < to_account_id:
-            rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.version)
-            rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.version)
+            rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.currency)
+            rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.currency)
         else:
-            rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.version)
-            rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.version)
+            rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.currency)
+            rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.currency)
 
         if rows1 == 0 or rows2 == 0:
             raise TransferServiceErr("concurrency conflict, please retry")
@@ -323,17 +323,21 @@ def execute_transfer_v2(self, from_uid, to_uid, from_account_id, to_account_id, 
 `update_balance` 是这样实现的：
 
 ```python
-def update_balance(self, account_id: int, delta: Decimal, version: int) -> bool:
+def update_balance(self, account_id: int, delta: Decimal, expected_currency: Currency) -> bool:
     cur = self.uow.session.execute(
         "UPDATE accounts "
         "SET balance = balance + :delta, version = version + 1 "
-        "WHERE id = :id AND version = :version AND balance + :delta >= 0",
-        {"delta": delta, "version": version, "id": account_id},
+        "WHERE id = :id "
+        "  AND currency = :expected_currency "
+        "  AND balance + :delta >= 0",
+        {"delta": delta, "currency": expected_currency, "id": account_id},
     )
     return cur.rowcount == 1
 ```
 
-传进去的 `version` 是"我读到的版本"，也就是期望值。数据库里如果还是这个版本，就更新，同时把 version 加一；如果已经被别人改过，影响行数为 0，返回 False。
+传进去的 `expected_currency` 是"我算 delta 时用的那个币种"。数据库里的币种如果还是它，就更新；如果不是，影响行数为 0，返回 False，抛出去重试。
+
+`version = version + 1` 留着是维护版本号本身，别的地方可能要用。这次的条件判断用的是币种，不是版本号。
 
 版本号在 SQL 里加，不在内存里加。如果先在内存 `increase_version()` 再写回，UPDATE 一失败，实体上的版本就比数据库多 1，后面拿这个实体做别的事都会出错。
 
@@ -353,52 +357,54 @@ delta 不需要在应用服务里手算。业务怎么变、变多少，还是�
 
 汇率是事务外查的，币种也是在事务外读的。这中间账户可能被改，比如迁移到了另一个币种。
 
-条件更新挡不住这种情况。`balance + delta >= 0` 只看余额，不看币种。delta 是按旧币种算的，币种一变，加进去的数就是错的。
+delta 是按币种算出来的。币种一变，这个 delta 就失效了，可余额本身完全没毛病。
 
-所以还要版本号。币种改了，version 必然跟着变；`update_balance` 带上 version 条件，影响 0 行就说明中间有人动过，抛出去让上层重试。
+第一反应是用版本号兜：币种改了，version 跟着变，带上 version 条件，影响 0 行就抛出去重试。
 
-版本号必须用事务外那次读到的 `from_account.version`，不能用事务里重新读出来的 `latest_from.version`。
+能挡住，但粒度太粗。账户上任何一个字段变了，version 都会变。一次和币种无关的并发修改，也会让这次转账白白失败。
 
-`latest_from` 是 `transfer` 在事务内重新取的最新值。如果币种在这期间被改过，它的 version 也已经跟着往前走了。拿这个 version 做条件更新，条件永远成立，写进去的却是按旧币种算的 delta。版本号等于没用上。
-
-`from_account` 是查汇率时读的那份，version 对应的是币种还没变的状态。用它做条件，币种一变就是 0 行，能挡住。
+更直接的办法是把币种写进 WHERE：
 
 ```python
-def update_balance(self, account_id: int, delta: Decimal, version: int) -> bool:
+def update_balance(self, account_id: int, delta: Decimal, expected_currency: Currency) -> bool:
     cur = self.uow.session.execute(
         "UPDATE accounts "
         "SET balance = balance + :delta, version = version + 1 "
-        "WHERE id = :id AND version = :version AND balance + :delta >= 0",
-        {"delta": delta, "version": version, "id": account_id},
+        "WHERE id = :id "
+        "  AND currency = :expected_currency "
+        "  AND balance + :delta >= 0",
+        {"delta": delta, "currency": expected_currency, "id": account_id},
     )
     return cur.rowcount == 1
 ```
 
-应用服务里两个都要检查，任何一个返回 0 行就说明这次修改作废：
-
-```python
-rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_version)
-rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_version)
-
-if rows1 == 0 or rows2 == 0:
-    raise TransferServiceErr("concurrency conflict, please retry")
-```
+只保护真正依赖的那个字段。币种变了才失败，别的不影响。
 
 这里有个认识上的转弯。
 
 一开始以为版本号只保护"状态的修改"，比如订单从 `CREATED` 到 `PAID`，没有 delta 可算，只能整体替换，所以要版本号。余额是增减型的，用条件更新就够了。
 
-但这次是"修改本身依赖了某个状态"。delta 是按币种算的，币种是账户的一个属性。币种变了，delta 就失效了，可余额本身完全没毛病。条件更新只看余额，看不出来这个。
+后来发现这次是"修改本身依赖了某个状态"。delta 是按币种算的，币种变了 delta 就失效。于是得出一个结论：版本号保护的不是"我改了什么"，是"我基于什么做的判断"。
 
-所以版本号保护的不是"我改了什么"，是"我基于什么做的判断"。只要一次修改读过了某个状态属性，那个属性变了，这次修改就该作废重来。
+这个判断是对的，但还能再进一步。既然已经知道"基于什么"了，为什么不把它直接写进 WHERE？
+
+```sql
+WHERE id = :id AND currency = :expected_currency
+```
+
+比版本号精确，也没有"这个版本号是哪一次读的"这种问题。
 
 | 场景 | 用什么 |
 |---|---|
 | 只改增减量，不读别的状态 | 条件更新 |
-| 改状态本身 | 版本号 |
-| 增减量依赖某个状态属性 | 两个都要 |
+| 增减量依赖某个状态属性 | 条件更新，把这个属性写进 WHERE |
+| 改状态本身，依赖的字段多到写不下 | 版本号 |
 
-第三行的例子就是这次转账：delta 依赖币种，币种是状态属性。
+第三行才是版本号该出场的地方。判断标准不是"要不要版本号"，是"这次判断依赖了哪些字段，能不能一条一条写进 WHERE"。能写就写，写不下再退回版本号。
+
+版本号还有个坑：必须用事务外那次读到的 `from_account.version`，不能用事务里重新读出来的 `latest_from.version`。`latest_from` 是 `transfer` 在事务内重新取的最新值，如果币种在这期间被改过，它的 version 也往前走了，条件永远成立，写进去的却是按旧币种算的 delta。
+
+用币种当条件就没这个问题。币种是算 delta 时用的那个值，直接拿来比，不存在"读的是哪一份"的歧义。
 
 ## 网关：慢依赖的唯一出口
 
@@ -738,14 +744,14 @@ InnoDB 有死锁检测，跑一会儿会发现环，挑一个事务回滚，报 
 
 ```python
 if from_account_id < to_account_id:
-    first_id, first_delta = from_account_id, from_delta
-    second_id, second_delta = to_account_id, to_delta
+    first_id, first_delta, first_currency = from_account_id, from_delta, from_account.currency
+    second_id, second_delta, second_currency = to_account_id, to_delta, to_account.currency
 else:
-    first_id, first_delta = to_account_id, to_delta
-    second_id, second_delta = from_account_id, from_delta
+    first_id, first_delta, first_currency = to_account_id, to_delta, to_account.currency
+    second_id, second_delta, second_currency = from_account_id, from_delta, from_account.currency
 
-rows1 = self.account_repo.update_balance(first_id, first_delta, first_version)
-rows2 = self.account_repo.update_balance(second_id, second_delta, second_version)
+rows1 = self.account_repo.update_balance(first_id, first_delta, first_currency)
+rows2 = self.account_repo.update_balance(second_id, second_delta, second_currency)
 
 if rows1 == 0 or rows2 == 0:
     raise TransferServiceErr("concurrency conflict, please retry")

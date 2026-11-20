@@ -316,7 +316,7 @@ class AccountRepository(ABC):
     def accounts_exists(self, account_ids: set[int]) -> bool: ...
 
     @abstractmethod
-    def update_balance(self, account_id: int, delta: Decimal, version: int) -> bool: ...
+    def update_balance(self, account_id: int, delta: Decimal, expected_currency: Currency) -> bool: ...
 
 
 # WARNING 资源库模式是像集合一样给上层提供具备业务语义的方法来操控缓存和数据库等的
@@ -364,7 +364,7 @@ class SQLAccountRepository(AccountRepository):
 
     def accounts_exists(self, account_ids: set[int]) -> bool: return False
 
-    def update_balance(self, account_id: int, delta: Decimal, version: int) -> bool:
+    def update_balance(self, account_id: int, delta: Decimal, expected_currency: Currency) -> bool:
         return False
 
 
@@ -544,16 +544,15 @@ class TransferAppService:
             from_delta = latest_from_account.balance - original_from_account.balance
             to_delta = latest_to_account.balance - original_to_account.balance
 
-            # NOTE 这里的 version 必须用事务外那次读到的（from_account / to_account），
-            #      不能用 latest_*。因为汇率是按事务外的币种算的，
-            #      如果这期间币种变了，latest_* 的 version 已经包含这次变更，
-            #      条件更新会通过，但 delta 用的是旧币种，账就错了。
+            # NOTE 币种用事务外那次读到的（from_account / to_account），
+            #      不能用 latest_*。汇率是按事务外的币种算的，
+            #      条件更新里带上币种，币种一变就 0 行，比版本号精确。
             if from_account_id < to_account_id:
-                rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.version)
-                rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.version)
+                rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.currency)
+                rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.currency)
             else:
-                rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.version)
-                rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.version)
+                rows2 = self.account_repo.update_balance(to_account_id, to_delta, to_account.currency)
+                rows1 = self.account_repo.update_balance(from_account_id, from_delta, from_account.currency)
 
             if rows1 == 0 or rows2 == 0:
                 raise TransferServiceErr("concurrency conflict, please retry")
