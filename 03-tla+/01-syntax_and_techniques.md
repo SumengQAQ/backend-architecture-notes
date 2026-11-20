@@ -62,11 +62,16 @@ Init ≜
 ```tla
 StateOk ≜
     ∧ ∀ people ∈ People: allocation[people] ≠ {}
-    ∧ ¬(∃ item ∈ Item: ∃ p1 ∈ People: ∃ p2 ∈ People \ {p1}:
-            item ∈ allocation[p1] ∧ item ∈ allocation[p2])
+    ∧ ∀ item ∈ Item: ∀ p1 ∈ People: ∀ p2 ∈ People \ {p1}:
+        ∨ (item ∈ allocation[p1] ∧ item ∉ allocation[p2])
+        ∨ (item ∉ allocation[p1] ∧ item ∈ allocation[p2])
 ```
 
-经检查通过。它说的是两件事：所有人都被分配到了 item；找不到一个 item，同时存在于两个不同人的 `allocation` 里。
+任取两个不同的人，某个 item 恰好在其中一个人手里。两个分支分别是"在 p1 不在 p2"和"不在 p1 在 p2"，都不满足的话，要么两人都拿着，要么两人都没拿，两种都被挡掉。
+
+一开始写的是 `¬(∃ item: ∃ p1, p2: item ∈ allocation[p1] ∧ item ∈ allocation[p2])`，只挡住了"两个人同时拿"，没挡住"谁都没拿"。而且"不存在一个……"这种句式在 TLA+ 里要套三层 `∃`，读起来也费劲。写成 `∀` 一次把两边都覆盖了。
+
+Init 里那三条约束和 `StateOk` 说的是同一件事，把 Init 的约束换成 `StateOk` 再跑，一样通过。
 
 完整文件：[examples/tla+/Allocation.tla](../examples/tla+/Allocation.tla)
 
