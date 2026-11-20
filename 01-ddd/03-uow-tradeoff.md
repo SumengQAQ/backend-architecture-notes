@@ -102,7 +102,7 @@ class UnitOfWork:
         return self._event_list[:]
 
     def accept_event_list(self, event_list: list[Event]) -> None:
-        self._event_list = event_list[:]
+        self._event_list.extend(event_list)
 
     def _write_to_the_event_table(self) -> None:
         if not self._event_list or self._session is None:
@@ -138,6 +138,10 @@ class UnitOfWork:
             self._session.close()
             self._event_list = []
 ```
+
+`accept_event_list` 用 `extend`，不能写成 `self._event_list = event_list[:]`。
+
+一个事务里可能改了两个聚合根。转账的时候 `from_account` 和 `to_account` 都会产生事件，应用服务要调两次 `accept_event_list`。直接赋值的话，第二次会把第一次的事件整个吞掉，最后只写进去一半。
 
 `_write_to_the_event_table` 放在 `commit` 之前，这样事件写入和业务数据在同一个事务里。业务失败就一起回滚，不会出现"事件发了但数据没存"。
 
