@@ -1,6 +1,6 @@
 # backend-architecture-notes
 
-![notes](https://img.shields.io/badge/notes-8-4a7c59)
+![notes](https://img.shields.io/badge/notes-9-4a7c59)
 ![focus](https://img.shields.io/badge/focus-DDD%20%C2%B7%20Distributed%20Tx%20%C2%B7%20TLA%2B-555)
 
 后端架构笔记：DDD 落地取舍、分布式事务、TLA+ 形式化验证。
@@ -27,7 +27,11 @@
 - [x] [能验证什么，不能验证什么](./03-tla+/02-what_and_what_not.md)：不变式、时序、精化的能力，以及抽象、公平性、代码一致性上的边界
 - [ ] 一个消息队列规约的解读
 
-### 04 系统设计
+### 04 并发中的数据一致性
+
+- [x] [数据库中的事务](./04-data_consistency/01-transactions_in_databases.md)：隔离级别、MVCC、脏写、写偏斜、条件更新、重试与幂等
+
+### 05 系统设计
 
 - [ ] 短链服务
 - [ ] 秒杀系统
@@ -50,10 +54,14 @@ examples/
 ├── outbox/
 │   ├── Outbox.tla     Outbox 规约
 │   └── Outbox.cfg
-└── tla+/
-    ├── Subset.tla     常量转变量
-    ├── Allocation.tla 多重集分配
-    └── TwoWorkers.tla 超组合，OnlyOnce 故意被违反
+├── tla+/
+│   ├── Subset.tla     常量转变量
+│   ├── Allocation.tla 多重集分配
+│   └── TwoWorkers.tla 超组合，OnlyOnce 故意被违反
+└── data_consistency/
+    ├── config/        共用的数据库配置
+    ├── purchasing_vehicle/  脏写，三种写法对比
+    └── ask_for_leave/       写偏斜，三种写法对比
 ```
 
 三个规约和 `tla+` 下那几个小例子的跑法一样，在各自的目录里执行：
@@ -67,6 +75,21 @@ java -cp ~/tla2tools.jar tlc2.TLC -deadlock -config Saga.cfg Saga.tla
 
 # examples/outbox
 java -cp ~/tla2tools.jar tlc2.TLC -deadlock -config Outbox.cfg Outbox.tla
+```
+
+`data_consistency` 是 Go 项目，要先有 MySQL：
+
+```
+cd examples/data_consistency
+cp .env.example .env          # 填数据库密码
+
+mysql -u <user> -p < purchasing_vehicle/schema.sql
+mysql -u <user> -p < purchasing_vehicle/seed.sql
+mysql -u <user> -p < ask_for_leave/schema.sql
+mysql -u <user> -p < ask_for_leave/seed.sql
+
+go run ./purchasing_vehicle
+go run ./ask_for_leave
 ```
 
 ## 说明

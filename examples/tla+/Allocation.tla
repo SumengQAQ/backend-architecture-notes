@@ -13,8 +13,7 @@ MergeFuncRangeSetToBag(f) ≜
          IN  SetToBag(f[k]) (+) MergeFuncRangeSetToBag([rest ∈ DOMAIN f \ {k} ↦ f[rest]])
 
 Init ≜
-    ∧ allocation ∈ [People → SUBSET Item]
-    ∧ ∀ p ∈ People: allocation[p] ≠ {}
+    ∧ allocation ∈ [People → SUBSET Item \ {{}}]
     ∧ LET allocation_bag ≜ MergeFuncRangeSetToBag(allocation)
       IN  ∧ DOMAIN allocation_bag = Item
           ∧ ∀ item ∈ Item: allocation_bag[item] = 1
