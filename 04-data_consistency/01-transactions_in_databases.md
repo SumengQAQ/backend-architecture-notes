@@ -478,11 +478,25 @@ if cur.Currency != fromAccount.Currency {
 **一、条件更新**
 
 ```sql
-UPDATE accounts SET balance = balance - ?
-WHERE id = ? AND currency = ?
+UPDATE accounts SET balance = balance + :delta
+WHERE id = ? AND currency = ? AND balance + :delta >= 0
 ```
 
-影响 0 行就重试。写事务很短的时候最省事。
+影响 0 行要分情况看是哪个条件不满足：
+
+```
+currency 不匹配    币种被人改了，delta 失效，可以重试
+balance 不够       钱不够，重试一百次也不够，直接拒绝
+id 不存在          数据没了，报错
+```
+
+不能一律重试。
+
+余额不足这种，重试只是在浪费时间。**可重试的只有“我依赖的东西变了”这类冲突**，业务规则不满足的，重试没有意义。
+
+所以异常要分开：`ConflictError` 可以重试，`InsufficientBalance` 直接返回给用户。
+
+写事务很短的时候，条件更新最省事。
 
 **二、先锁再验**
 
@@ -504,6 +518,8 @@ UPDATE accounts SET balance = balance - :delta WHERE id = ?;
 冲突频繁的时候必须用第二种
 
 第一种每次冲突都要整个重试：重新进事务、重新读、重新验证、重新更新。如果写事务里要做的事比较多，改好几张表，每次重试都可能再被打断。
+
+而且这里的“冲突”只指币种被改这种可重试的，余额不足不在里面。
 
 重试次数一多，整体反而更慢。
 
