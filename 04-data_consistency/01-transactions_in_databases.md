@@ -359,21 +359,69 @@ WHERE NOT EXISTS (
 );
 ```
 
-但两个事务能同时通过。
+很多人以为写成一条语句就没问题了。不是。
 
-因为 `NOT EXISTS` 查的是**各自快照里的 bookings**，对方那条还没提交，谁都看不见。这就是案例二里的写偏斜。
+### 一条语句也有写偏斜
 
-有人会想在里面加个 `FOR UPDATE`，省得拆两步：
+有人觉得“先查再改”才有写偏斜，写成一条语句就没事了。
 
-```sql
-INSERT INTO bookings (...)
-SELECT ...
-WHERE NOT EXISTS (SELECT 1 FROM bookings WHERE ... FOR UPDATE);
+但“语句原子”指的是**要么全成功、要么全回滚**，不是“执行期间别人不能插进来”。
+
+MySQL 执行这条语句，内部是拆开的：
+
+```
+扫描 → 判断 NOT EXISTS → 构造要插入的行 → 插入
 ```
 
-不行。MySQL 和 PostgreSQL 都不允许在 `INSERT ... SELECT` 的子查询里加锁定子句。
+每一步之间，别的连接都能干活。
 
-要锁就得拆成两句，先 `SELECT ... FOR UPDATE`，再 `INSERT`。
+这里有个麻烦的地方。
+
+RR 下 `INSERT ... SELECT` 确实会对 `FROM` 后面的表加共享 next-key lock。MySQL 文档：
+
+> `INSERT INTO T SELECT ... FROM S WHERE ...` ... If the transaction isolation level is `READ COMMITTED`, `InnoDB` does the search on `S` as a consistent read (no locks). Otherwise, `InnoDB` sets shared next-key locks on rows from `S`.
+
+但 `S` 指的是 `FROM` 后面的表。我们这个例子 `FROM DUAL`，真正要保护的 `bookings` 在子查询里，文档没有写这一层。
+
+所以两种可能：
+
+```
+锁覆盖到子查询    两个事务都拿共享锁 → 插入时互相等 → 死锁
+锁没覆盖到        两个事务都读到"不存在" → 都插入 → 重复
+```
+
+不管哪种，都不能靠它。而且子查询里也不能写 `FOR UPDATE`，MySQL 和 PostgreSQL 都不允许在 `INSERT ... SELECT` 的子查询里加锁定子句。
+
+想控制锁，只能拆成两句：先 `SELECT ... FOR UPDATE`，再 `INSERT`。
+
+> 试过一个很怪的写法：把 `FROM DUAL` 换成 `FROM bookings`，用 `HAVING` 把行数压成一行。
+>
+> ```sql
+> INSERT INTO bookings (room_id, start_at, end_at, user_id)
+> SELECT 1, '14:00', '15:00', 42
+> FROM bookings
+> HAVING (SELECT COUNT(*) FROM bookings WHERE ...) = 0;
+> ```
+>
+> 能跑。`HAVING` 不带 `GROUP BY` 时把整张表当一个组，条件满足就返回一行。
+>
+> 但不推荐。`HAVING` 不带 `GROUP BY` 是 MySQL 的方言，标准 SQL 不支持。而且外层 `FROM` 换成 `bookings` 之后，RR 下照样加共享锁，死锁一点没少。为了少写一个 `DUAL` 把可移植性和语义都弄乱了，不值。
+
+### 和 UPDATE 的区别
+
+`UPDATE ... WHERE` 是另一回事：
+
+```sql
+UPDATE accounts SET balance = balance - 100 WHERE id = 1 AND balance >= 100;
+```
+
+扫描的时候就把行锁了，“判断”和“写”在同一次加锁里完成，别人进不来。
+
+`INSERT ... SELECT` 的“判断”在 SELECT 阶段，“写”在 INSERT 阶段，中间没有锁。
+
+这就是为什么同样是“一条语句”，`UPDATE` 能挡住，`INSERT ... SELECT` 不一定。
+
+**保护来自锁或者唯一约束，不是语句的条数**。
 
 所以要靠下面三样之一。
 
