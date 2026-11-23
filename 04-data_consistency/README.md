@@ -27,3 +27,4 @@
 借助DDIA这部经典，通过事务的视角，浅析如何保持数据的一致性
 
 - [x] [数据库中的事务](./01-transactions_in_databases.md)
+- [x] [被误解的可串行化](./02-serializability_often_misunderstood.md)
