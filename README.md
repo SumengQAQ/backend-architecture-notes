@@ -1,6 +1,6 @@
 # backend-architecture-notes
 
-![notes](https://img.shields.io/badge/notes-10-4a7c59)
+![notes](https://img.shields.io/badge/notes-11-4a7c59)
 ![focus](https://img.shields.io/badge/focus-DDD%20%C2%B7%20Distributed%20Tx%20%C2%B7%20TLA%2B-555)
 
 后端架构笔记：DDD 落地取舍、分布式事务、TLA+ 形式化验证。
@@ -31,6 +31,7 @@
 
 - [x] [数据库中的事务](./04-data_consistency/01-transactions_in_databases.md)：隔离级别、MVCC、脏写、写偏斜、条件更新、重试与幂等
 - [x] [被误解的可串行化](./04-data_consistency/02-serializability_often_misunderstood.md)：2PL 的死锁和读阻塞，SSI 的两种冲突，以及两者的取舍
+- [x] [破碎的现实](./04-data_consistency/03-fractured_reality.md)：网络与时间的不确定性，同步网络与异步网络，NTP 校时，Lamport 时钟与向量时钟
 
 ### 05 系统设计
 

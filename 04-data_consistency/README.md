@@ -20,11 +20,10 @@
 
 即使如此，也需要考虑如何把云服务和自己的服务进行集成，同时不破坏数据的一致性
 
-
-
 ## 本目录
 
 借助DDIA这部经典，通过事务的视角，浅析如何保持数据的一致性
 
 - [x] [数据库中的事务](./01-transactions_in_databases.md)
 - [x] [被误解的可串行化](./02-serializability_often_misunderstood.md)
+- [x] [破碎的现实](./03-fractured_reality.md)
